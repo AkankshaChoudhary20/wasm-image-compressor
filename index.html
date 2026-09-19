@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WASM Image Compressor</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 900px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+    line-height: 1.5;
+  }
+  h1 { font-size: 1.4rem; }
+  .sub { color: #777; margin-top: -0.5rem; }
+  fieldset {
+    border: 1px solid #8884;
+    border-radius: 8px;
+    margin: 1rem 0;
+    padding: 1rem;
+  }
+  label { display: block; margin: 0.5rem 0 0.25rem; font-size: 0.9rem; }
+  input[type="number"] { width: 6rem; }
+  .row { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .images { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1rem; }
+  .panel { flex: 1; min-width: 260px; }
+  .panel img {
+    max-width: 100%;
+    border: 1px solid #8884;
+    border-radius: 6px;
+    display: block;
+  }
+  .stat { font-family: ui-monospace, monospace; font-size: 0.9rem; }
+  button {
+    padding: 0.5rem 1rem;
+    font-size: 1rem;
+    border-radius: 6px;
+    border: 1px solid #8884;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status { min-height: 1.4em; font-size: 0.9rem; }
+  #status.error { color: #d33; }
+  #status.ok { color: #2a8; }
+  a.download {
+    display: inline-block;
+    margin-top: 0.5rem;
+  }
+  .privacy {
+    background: #8882;
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    font-size: 0.9rem;
+  }
+</style>
+</head>
+<body>
+  <h1>WASM Image Compressor</h1>
+  <p class="sub">Rust, compiled to WebAssembly, resizing and re-encoding your image entirely in this tab.</p>
+
+  <p class="privacy">
+    Nothing here is uploaded anywhere. The file you pick is decoded, resized,
+    and re-encoded by a WebAssembly module running locally in your browser.
+    Open devtools' Network tab if you want to confirm no request fires when
+    you process an image.
+  </p>
+
+  <fieldset>
+    <legend>1. Choose an image</legend>
+    <input id="file-input" type="file" accept="image/png, image/jpeg" />
+  </fieldset>
+
+  <fieldset>
+    <legend>2. Options</legend>
+    <div class="row">
+      <div>
+        <label for="max-width">Max width (px)</label>
+        <input id="max-width" type="number" value="800" min="1" />
+      </div>
+      <div>
+        <label for="max-height">Max height (px)</label>
+        <input id="max-height" type="number" value="800" min="1" />
+      </div>
+      <div>
+        <label for="quality">JPEG quality (1-100)</label>
+        <input id="quality" type="number" value="75" min="1" max="100" />
+      </div>
+      <div>
+        <label for="format">Output format</label>
+        <select id="format">
+          <option value="jpeg" selected>JPEG</option>
+          <option value="png">PNG</option>
+        </select>
+      </div>
+    </div>
+  </fieldset>
+
+  <button id="process-btn" disabled>Process image</button>
+  <p id="status"></p>
+
+  <div class="images">
+    <div class="panel">
+      <h3>Before</h3>
+      <p class="stat" id="before-stat">—</p>
+      <img id="before-img" alt="original preview" hidden />
+    </div>
+    <div class="panel">
+      <h3>After</h3>
+      <p class="stat" id="after-stat">—</p>
+      <img id="after-img" alt="result preview" hidden />
+      <div id="download-wrap"></div>
+    </div>
+  </div>
+
+  <script type="module">
+    import init, { compress_image, get_dimensions, init_panic_hook } from "./pkg/wasm_image_compressor.js";
+
+    const fileInput = document.getElementById("file-input");
+    const processBtn = document.getElementById("process-btn");
+    const statusEl = document.getElementById("status");
+    const beforeImg = document.getElementById("before-img");
+    const afterImg = document.getElementById("after-img");
+    const beforeStat = document.getElementById("before-stat");
+    const afterStat = document.getElementById("after-stat");
+    const downloadWrap = document.getElementById("download-wrap");
+
+    let originalBytes = null;
+    let originalName = "image";
+
+    function fmtBytes(n) {
+      if (n < 1024) return `${n} B`;
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+      return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+    }
+
+    function setStatus(msg, kind) {
+      statusEl.textContent = msg;
+      statusEl.className = kind || "";
+    }
+
+    async function main() {
+      setStatus("Loading WebAssembly module...");
+      await init();
+      init_panic_hook();
+      setStatus("Ready. Choose an image to begin.");
+      processBtn.disabled = false;
+    }
+
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+      originalName = file.name.replace(/\.[^.]+$/, "");
+      const buf = new Uint8Array(await file.arrayBuffer());
+      originalBytes = buf;
+
+      const url = URL.createObjectURL(file);
+      beforeImg.src = url;
+      beforeImg.hidden = false;
+
+      try {
+        const dims = get_dimensions(buf);
+        beforeStat.textContent = `${fmtBytes(buf.length)} — ${dims[0]}x${dims[1]}px (${file.type || "unknown type"})`;
+      } catch (e) {
+        beforeStat.textContent = `${fmtBytes(buf.length)} (could not read dimensions: ${e})`;
+      }
+
+      afterImg.hidden = true;
+      afterStat.textContent = "—";
+      downloadWrap.innerHTML = "";
+      setStatus("Ready to process.", "ok");
+    });
+
+    processBtn.addEventListener("click", () => {
+      if (!originalBytes) {
+        setStatus("Choose an image first.", "error");
+        return;
+      }
+      const maxWidth = parseInt(document.getElementById("max-width").value, 10) || 800;
+      const maxHeight = parseInt(document.getElementById("max-height").value, 10) || 800;
+      const quality = parseInt(document.getElementById("quality").value, 10) || 75;
+      const format = document.getElementById("format").value;
+
+      setStatus("Processing...");
+      processBtn.disabled = true;
+
+      // Give the status text a chance to paint before the (synchronous,
+      // CPU-bound) wasm call blocks the main thread.
+      setTimeout(() => {
+        try {
+          const start = performance.now();
+          const out = compress_image(originalBytes, maxWidth, maxHeight, quality, format);
+          const elapsed = (performance.now() - start).toFixed(1);
+
+          const mime = format === "png" ? "image/png" : "image/jpeg";
+          const blob = new Blob([out], { type: mime });
+          const url = URL.createObjectURL(blob);
+
+          afterImg.src = url;
+          afterImg.hidden = false;
+
+          const dims = get_dimensions(out);
+          const pct = (100 * (1 - out.length / originalBytes.length)).toFixed(1);
+          afterStat.textContent =
+            `${fmtBytes(out.length)} — ${dims[0]}x${dims[1]}px (${pct}% smaller, ${elapsed}ms)`;
+
+          downloadWrap.innerHTML = "";
+          const a = document.createElement("a");
+          a.className = "download";
+          a.href = url;
+          a.download = `${originalName}-compressed.${format === "png" ? "png" : "jpg"}`;
+          a.textContent = "Download result";
+          downloadWrap.appendChild(a);
+
+          setStatus("Done — processed entirely in your browser.", "ok");
+        } catch (e) {
+          setStatus(`Error: ${e}`, "error");
+        } finally {
+          processBtn.disabled = false;
+        }
+      }, 10);
+    });
+
+    main().catch((e) => setStatus(`Failed to load WASM module: ${e}`, "error"));
+  </script>
+</body>
+</html>
