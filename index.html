@@ -127,6 +127,8 @@
     const downloadWrap = document.getElementById("download-wrap");
 
     let originalBytes = null;
+    let selectionVersion = 0;
+    let moduleReady = false;
     let originalName = "image";
 
     function fmtBytes(n) {
@@ -145,31 +147,43 @@
       await init();
       init_panic_hook();
       setStatus("Ready. Choose an image to begin.");
-      processBtn.disabled = false;
+      moduleReady = true;
+      processBtn.disabled = !originalBytes;
     }
 
     fileInput.addEventListener("change", async () => {
-      const file = fileInput.files?.[0];
-      if (!file) return;
-      originalName = file.name.replace(/\.[^.]+$/, "");
-      const buf = new Uint8Array(await file.arrayBuffer());
-      originalBytes = buf;
-
-      const url = URL.createObjectURL(file);
-      beforeImg.src = url;
-      beforeImg.hidden = false;
-
-      try {
-        const dims = get_dimensions(buf);
-        beforeStat.textContent = `${fmtBytes(buf.length)} — ${dims[0]}x${dims[1]}px (${file.type || "unknown type"})`;
-      } catch (e) {
-        beforeStat.textContent = `${fmtBytes(buf.length)} (could not read dimensions: ${e})`;
-      }
-
+      const version = ++selectionVersion;
+      originalBytes = null;
+      processBtn.disabled = true;
       afterImg.hidden = true;
       afterStat.textContent = "—";
       downloadWrap.innerHTML = "";
-      setStatus("Ready to process.", "ok");
+      const file = fileInput.files?.[0];
+      if (!file) {
+        beforeImg.hidden = true;
+        beforeStat.textContent = "—";
+        setStatus("Choose an image to begin.");
+        return;
+      }
+      try {
+        const buf = new Uint8Array(await file.arrayBuffer());
+        if (version !== selectionVersion) return;
+        originalName = file.name.replace(/\.[^.]+$/, "");
+        originalBytes = buf;
+        beforeImg.src = URL.createObjectURL(file);
+        beforeImg.hidden = false;
+        try {
+          const dims = get_dimensions(buf);
+          beforeStat.textContent = `${fmtBytes(buf.length)} — ${dims[0]}x${dims[1]}px (${file.type || "unknown type"})`;
+        } catch (e) {
+          beforeStat.textContent = `${fmtBytes(buf.length)} (could not read dimensions: ${e})`;
+        }
+        setStatus("Ready to process.", "ok");
+      } catch (e) {
+        if (version === selectionVersion) setStatus(`Could not read image: ${e}`, "error");
+      } finally {
+        if (version === selectionVersion) processBtn.disabled = !moduleReady || !originalBytes;
+      }
     });
 
     processBtn.addEventListener("click", () => {
@@ -185,9 +199,11 @@
       setStatus("Processing...");
       processBtn.disabled = true;
 
+      const version = selectionVersion;
       // Give the status text a chance to paint before the (synchronous,
       // CPU-bound) wasm call blocks the main thread.
       setTimeout(() => {
+        if (version !== selectionVersion) return;
         try {
           const start = performance.now();
           const out = compress_image(originalBytes, maxWidth, maxHeight, quality, format);
@@ -217,7 +233,7 @@
         } catch (e) {
           setStatus(`Error: ${e}`, "error");
         } finally {
-          processBtn.disabled = false;
+          if (version === selectionVersion) processBtn.disabled = !moduleReady || !originalBytes;
         }
       }, 10);
     });
